@@ -19,13 +19,13 @@
 
 | Job | 入口类 | 启动脚本 | API 风格 |
 |---|---|---|---|
-| tclog-setl | `etl.flow.TCLogFlinkStreamer` | `start_tclog_setl.sh` | DataStream API |
+| log-setl | `etl.flow.LogFlinkStreamer` | `start_log_setl.sh` | DataStream API |
 | netflow-setl | `etl.flow.NetflowFlinkStreamer` | `start_netflow_setl.sh` | DataStream API |
-| tclog-ip-statistic | `statistic.TCLogIpMonitorMain` | `start_tclog_ip_statistic.sh` | Table API + SQL |
-| tclog-ippair-statistic | `statistic.TCLogIpPairMonitorMain` | `start_tclog_ippair_statistic.sh` | Table API + SQL |
+| log-ip-statistic | `statistic.LogIpMonitorMain` | `start_log_ip_statistic.sh` | Table API + SQL |
+| log-ippair-statistic | `statistic.LogIpPairMonitorMain` | `start_log_ippair_statistic.sh` | Table API + SQL |
 | netflow-ip-statistic | `statistic.NetFlowIpMonitorMain` | `start_netflow_ip_statistic.sh` | Table API + SQL |
 | netflow-ippair-statistic | `statistic.NetFlowIpPairMonitorMain` | `start_netflow_ippair_statistic.sh` | Table API + SQL |
-| tclog-detect | `detect.TCLogMain` | `start_tclog_detect.sh` | Table API + SQL |
+| log-detect | `detect.LogMain` | `start_log_detect.sh` | Table API + SQL |
 | netflow-detect | `detect.NetflowMain` | `start_netflow_detect.sh` | Table API + SQL |
 | netflow-count | `detect.NetflowCountMain` | `start_netflow_count.sh` | Table API + SQL + DataStream windowAll |
 
@@ -43,20 +43,20 @@
 graph LR
     A["L1 Kafka<br/>(AVRO 大包)"] --> B["KafkaSource<br/>并行度=120/30"]
     B --> C["RichFlatMap<br/>AVRO 解码<br/>1包→N条记录"]
-    C --> D["Filter<br/>TCLogFilter/NetflowFilter<br/>脏数据+时间+跨境过滤"]
+    C --> D["Filter<br/>LogFilter/NetflowFilter<br/>脏数据+时间+跨境过滤"]
     D --> E["Map<br/>KnowledgeMap<br/>知识富化"]
-    E --> F["FlinkKafkaProducer<br/>BSA 编码→L2 Kafka"]
+    E --> F["FlinkKafkaProducer<br/>二进制编码→L2 Kafka"]
     style D fill:#fff3cd
     style E fill:#d1ecf1
 ```
 
-**TCLogFlinkStreamer 数据流**（`start_tclog_setl.sh`，并行度=120）：
+**LogFlinkStreamer 数据流**（`start_log_setl.sh`，并行度=120）：
 ```
-L1 Kafka → flatMap(AVRO解码) → filter(TCLogFilter) → map(TCLogKnowledgeMap) → sink(L2 Kafka)
+L1 Kafka → flatMap(AVRO解码) → filter(LogFilter) → map(LogKnowledgeMap) → sink(L2 Kafka)
 ```
 - **无 KeyBy**：纯 map/filter 流水线，数据按 Kafka 分区自然分布，无重分区
 - **形态突变**：1 条 AVRO 大包 flatMap 展开为上万条业务记录，是吞吐放大的关键点
-- **filter 位置**：`filter(TCLogFilter)` 在 `map(KnowledgeMap)` **之前**执行，先过滤再富化（高效）
+- **filter 位置**：`filter(LogFilter)` 在 `map(KnowledgeMap)` **之前**执行，先过滤再富化（高效）
 
 **NetflowFlinkStreamer 数据流**（`start_netflow_setl.sh`，并行度=60，source=30）：
 ```
@@ -69,8 +69,8 @@ L1 Kafka → flatMap(AVRO解码) → map(NetflowKnowledgeMap) → filter(Netflow
 
 ```mermaid
 graph TB
-    A["L2 Kafka<br/>(BSA 二进制)"] --> B["KafkaSourceFunction<br/>自定义 Source"]
-    B --> C["Map<br/>BSA反序列化→LogPojo"]
+    A["L2 Kafka<br/>(二进制)"] --> B["KafkaSourceFunction<br/>自定义 Source"]
+    B --> C["Map<br/>二进制反序列化→LogPojo"]
     C --> D["createTemporaryView<br/>pojo_log + proctime"]
     D --> E["tableEnv.sqlQuery<br/>5min TUMBLE 窗口"]
     E --> F["toDataStream<br/>→ Row 流"]
@@ -80,7 +80,7 @@ graph TB
     H --> D
 ```
 
-#### 2.2.1 IP 统计（tclog-ip / netflow-ip）
+#### 2.2.1 IP 统计（log-ip / netflow-ip）
 
 **SQL 模板**（`Constant.IP_SQL_TEMPLATE`）：
 ```sql
@@ -95,7 +95,7 @@ GROUP BY TUMBLE(proctime, INTERVAL '5' MINUTE), asset_ip
 - **增量聚合**：`SUM`、`MIN`、`MAX` 均为 Flink 内置增量聚合函数，状态不膨胀
 - **倾斜风险**：⭐ **高** — 若某个 `asset_ip`（重点单位 IP）在 5 分钟窗口内产生海量连接，该 IP 对应的所有数据都会被 hash 到同一 subtask，导致该 subtask 负载远高于其他
 
-#### 2.2.2 IP Pair 统计（tclog-ippair / netflow-ippair）
+#### 2.2.2 IP Pair 统计（log-ippair / netflow-ippair）
 
 **SQL 模板**（`Constant.TCLOG_IP_PAIR_SQL_TEMPLATE` / `NETFLOW_IP_PAIR_SQL_TEMPLATE`）：
 ```sql
@@ -116,21 +116,21 @@ GROUP BY TUMBLE(proctime, INTERVAL '5' MINUTE), doc_id
 
 ```mermaid
 graph TB
-    A["L2 Kafka<br/>(BSA)"] --> B["KafkaSourceFunction"]
-    B --> C["Map<br/>NetflowMap/TCLogMap"]
+    A["L2 Kafka<br/>(二进制)"] --> B["KafkaSourceFunction"]
+    B --> C["Map<br/>NetflowMap/LogMap"]
     C --> D["Filter链<br/>白名单→资产→重点单位"]
-    D --> E["createTemporaryView<br/>netflow_v1 / netflow_v2<br/>t_connlog_v1 / tcLog_asset"]
+    D --> E["createTemporaryView<br/>netflow_v1 / netflow_v2<br/>t_log_v1 / log_asset"]
     E --> F["tableEnv.sqlQuery<br/>多规则SQL（循环）"]
     F --> G["toAppendStream"]
     G --> H["filter(WhiteRuleFilterFunction)"]
     H --> I["addSink(PGSink01-04)→PG"]
 ```
 
-#### 2.3.1 NetflowMain / TCLogMain（多规则检测）
+#### 2.3.1 NetflowMain / LogMain（多规则检测）
 
 **数据流**：
 ```
-L2 Kafka → map(NetflowMap/TCLogMap) → filter(WhiteListFilter) → filter(AssetFilter) → 注册Table
+L2 Kafka → map(NetflowMap/LogMap) → filter(WhiteListFilter) → filter(AssetFilter) → 注册Table
 → 循环执行多条规则SQL → union合并 → filter(WhiteRuleFilterFunction) → addSink(PGSink)
 ```
 
@@ -172,13 +172,13 @@ GROUP BY TUMBLE(proctime, INTERVAL '5' MINUTE), sip
 
 | Job | 全局并行度 | Source 并行度 | Sink 并行度 | TM 内存 | Slots/TM |
 |---|---|---|---|---|---|
-| tclog-setl | 120 | 120 | — | 20g | 2 |
+| log-setl | 120 | 120 | — | 20g | 2 |
 | netflow-setl | 60 | 30 | — | 30g | 2 |
-| tclog-ip-statistic | 60 | 60 | — | 16g | 2 |
-| tclog-ippair-statistic | 120 | 60 | — | 25g | 2 |
+| log-ip-statistic | 60 | 60 | — | 16g | 2 |
+| log-ippair-statistic | 120 | 60 | — | 25g | 2 |
 | netflow-ip-statistic | 60 | 60 | — | 12g | 2 |
 | netflow-ippair-statistic | 180 | 60 | — | 30g | 3 |
-| tclog-detect | 180 | 60 | 10 | 32g | 3 |
+| log-detect | 180 | 60 | 10 | 32g | 3 |
 | netflow-detect | 180 | 60 | 30 | 35g | 3 |
 | netflow-count | 120 | 60 | **1** ⚠️ | 30g | 4 |
 
@@ -191,7 +191,7 @@ GROUP BY TUMBLE(proctime, INTERVAL '5' MINUTE), sip
 | 自定义分区器（Partitioner） | ❌ 否 | — | 全工程无 `partitionCustom` 调用 |
 | Salting（加盐）策略 | ❌ 否 | — | 无任何加盐/随机前缀逻辑 |
 | 两阶段聚合（Local+Global） | ⚠️ 部分 | `NetflowCountMain` | SQL 按 sip 聚合后 `windowAll` 全局聚合，但 windowAll 并行度=1，等于退化为单阶段 |
-| KeyBy 前 filter 过滤无效数据 | ✅ 是 | ETL 层 `TCLogFilter`/`NetflowFilter`；检测层 `WhiteListFilter`/`AssetFilter`/`KeyUnitFilter` | 过滤脏数据（>10TB/超7天/未跨境/零流量）和白名单/非重点单位 |
+| KeyBy 前 filter 过滤无效数据 | ✅ 是 | ETL 层 `LogFilter`/`NetflowFilter`；检测层 `WhiteListFilter`/`AssetFilter`/`KeyUnitFilter` | 过滤脏数据（>10TB/超7天/未跨境/零流量）和白名单/非重点单位 |
 | **硬编码热点 IP 过滤** | ✅ 是 | `BigKeyFilter` | **唯一显式倾斜处理**：硬编码过滤某热点公网 IP，仅用于 netflow-ippair-statistic |
 | rebalance/rescale 打散 | ❌ 否 | — | 无任何调用 |
 | 增量聚合（AggregateFunction） | ✅ 是 | 大量 UDF | `SUM`/`COUNT`/`MIN`/`MAX` + 自定义 `TopOneFunction`/`FlowTop1PortFunction`/`PortDistributionFunction` 等 |
@@ -215,7 +215,7 @@ public class BigKeyFilter extends RichFilterFunction<LogPojo> {
 ```
 - **仅用于** `NetFlowIpPairMonitorMain`，在 `map` 之后、注册 Table 之前过滤
 - **硬编码**某热点公网 IP（以常量形式写入代码），直接丢弃该 IP 的所有 IP Pair 统计数据
-- **问题**：① 热点 IP 列表写死在代码中，无法动态调整；② 数据被直接丢弃而非打散，影响统计完整性；③ 仅 netflow-ippair 使用，tclog-ippair 未使用
+- **问题**：① 热点 IP 列表写死在代码中，无法动态调整；② 数据被直接丢弃而非打散，影响统计完整性；③ 仅 netflow-ippair 使用，log-ippair 未使用
 
 ---
 
@@ -223,7 +223,7 @@ public class BigKeyFilter extends RichFilterFunction<LogPojo> {
 
 ### 风险点 1：IP Pair 统计的 doc_id 分组 ⭐⭐⭐ 极高
 
-**位置**：`TCLogIpPairMonitorMain` / `NetFlowIpPairMonitorMain`
+**位置**：`LogIpPairMonitorMain` / `NetFlowIpPairMonitorMain`
 
 **原因**：
 - `doc_id = SHA-256(asset_ip + peer_ip)` 是确定性的，相同 IP 对的 doc_id 恒定
@@ -251,7 +251,7 @@ aggregatedStream.addSink(pgSink01).setParallelism(1);  // 强制单并行度
 
 ### 风险点 3：IP 统计的 asset_ip 分组 ⭐⭐ 高
 
-**位置**：`TCLogIpMonitorMain` / `NetFlowIpMonitorMain`
+**位置**：`LogIpMonitorMain` / `NetFlowIpMonitorMain`
 
 **原因**：
 - `GROUP BY TUMBLE(proctime, 5min), asset_ip`，asset_ip 为重点单位 IP
@@ -260,7 +260,7 @@ aggregatedStream.addSink(pgSink01).setParallelism(1);  // 强制单并行度
 
 ### 风险点 4：检测层多规则 sip+dip 分组 ⭐⭐ 高
 
-**位置**：`NetflowMain` / `TCLogMain` + `conf/detect_rule.sql`
+**位置**：`NetflowMain` / `LogMain` + `conf/detect_rule.sql`
 
 **原因**：
 - 大量规则使用 `GROUP BY TUMBLE + sip + dip`，热门 IP 对（如境内网关↔境外 CDN）数据量极大
@@ -269,7 +269,7 @@ aggregatedStream.addSink(pgSink01).setParallelism(1);  // 强制单并行度
 
 ### 风险点 5：ETL 层 AVRO 解码的 flatMap 放大 ⭐ 中
 
-**位置**：`TCLogFlinkStreamer` / `NetflowFlinkStreamer` 的 `RichFlatMapFunction`
+**位置**：`LogFlinkStreamer` / `NetflowFlinkStreamer` 的 `RichFlatMapFunction`
 
 **原因**：
 - 1 条 AVRO 大包可展开为上万条业务记录，flatMap 输出量远大于输入
@@ -330,7 +330,7 @@ String FLOW_COUNT_SQL = "SELECT MAX(start_time), SUM(up_bytes), SUM(down_bytes) 
 **改进**：
 1. 热点 IP 列表从 `env.conf` 或 PG 表动态加载（可运行时更新）
 2. 对热点 IP 不直接丢弃，而是采样或限流（如每 100 条取 1 条，或按时间窗口限流）
-3. 在 tclog-ippair-statistic 中也启用 BigKeyFilter（当前缺失）
+3. 在 log-ippair-statistic 中也启用 BigKeyFilter（当前缺失）
 
 ### 建议 4：开启 Table API miniBatch 优化
 
@@ -364,8 +364,8 @@ tableEnv.getConfig().getConfiguration().setString(
 **改进**（仅当观察到 Source 分区不均时）：
 ```java
 DataStream<Map<String, Object>> outputLog = log.flatMap(...)
-    .filter(new TCLogFilter(...))
-    .map(new TCLogKnowledgeMap(...))
+    .filter(new LogFilter(...))
+    .map(new LogKnowledgeMap(...))
     .rebalance();  // 在 sink 前打散
 ```
 > ⚠️ 仅在确认分区不均时使用，rebalance 会引入网络 shuffle 开销
@@ -387,7 +387,7 @@ DataStream<Map<String, Object>> outputLog = log.flatMap(...)
 **优先级排序**：
 1. 🔴 **P0**：消除 `NetflowCountMain` 的 `windowAll` 单点瓶颈（影响整个 Job 吞吐）
 2. 🔴 **P0**：为 IP Pair 统计引入两阶段聚合（影响 2 个统计 Job 稳定性）
-3. 🟡 **P1**：BigKeyFilter 动态化 + 扩展到 tclog-ippair
+3. 🟡 **P1**：BigKeyFilter 动态化 + 扩展到 log-ippair
 4. 🟡 **P1**：开启 miniBatch + TWO_PHASE 聚合优化
 5. 🟢 **P2**：CONCAT_LOG UDF 状态限制
 6. 🟢 **P2**：ETL 层 rebalance（按需）

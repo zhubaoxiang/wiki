@@ -31,7 +31,7 @@ Flink 反着来：**数据是流动的，处理逻辑挂在水管上，数据流
 ```mermaid
 graph LR
     A["L1 Kafka<br/>(原始AVRO大包)"] --> B["setl_flow<br/>ETL解码+富化+过滤"]
-    B --> C["L2 Kafka<br/>(BSA二进制)"]
+    B --> C["L2 Kafka<br/>(二进制)"]
     C --> D["statistic_engine<br/>5min窗口聚合→ES"]
     C --> E["detect_engine<br/>规则检测→PG"]
 ```
@@ -40,7 +40,7 @@ graph LR
 
 ## 2. 最小骨架：一个 Flink 程序长什么样
 
-看 `setl_flow` 的 `TCLogFlinkStreamer.java`，去掉配置只留骨架：
+看 `setl_flow` 的 `LogFlinkStreamer.java`，去掉配置只留骨架：
 
 ```java
 public static void main(String[] args) {
@@ -53,8 +53,8 @@ public static void main(String[] args) {
     DataStreamSource<byte[]> msg = env.fromSource(kafkaSource, ...);
     // ② 变换链
     DataStream<Map<String, Object>> log = msg.flatMap(new RichFlatMapFunction<byte[], ...>(){...});
-    DataStream<Map<String, Object>> outputLog = log.filter(new TCLogFilter(...))
-                                                  .map(new TCLogKnowledgeMap(...));
+    DataStream<Map<String, Object>> outputLog = log.filter(new LogFilter(...))
+                                                  .map(new LogKnowledgeMap(...));
     // ③ 输出
     outputLog.addSink(new FlinkKafkaProducer(...));
     env.execute("TCLOG-SETL");   // 启动！
@@ -72,9 +72,9 @@ public static void main(String[] args) {
 
 | 算子 | 作用 | 仓库实例 |
 |---|---|---|
-| `map` | 1 条进 1 条出 | `TCLogKnowledgeMap`（知识富化） |
+| `map` | 1 条进 1 条出 | `LogKnowledgeMap`（知识富化） |
 | `flatMap` | 1 条进 N 条出 | AVRO 大包拆成上万条记录（吞吐放大点） |
-| `filter` | 按条件放行/丢弃 | `TCLogFilter`（脏数据过滤） |
+| `filter` | 按条件放行/丢弃 | `LogFilter`（脏数据过滤） |
 | `keyBy` | 按 key 分组 | `IpSaltedAggregator` 两阶段聚合 |
 | `window` | 按时间/数量攒批计算 | 5min 滚动窗口 |
 | `addSink` | 输出 | `HttpIpSink`、`PGSink01`、Kafka Producer |
@@ -85,7 +85,7 @@ public static void main(String[] args) {
 
 单个算子能力有限，Flink 把算子**复制多份并行跑**，每份叫 **subtask**，份数叫**并行度（parallelism）**。
 
-对照启动脚本 `bin/start_tclog_ip_statistic.sh`：
+对照启动脚本 `bin/start_log_ip_statistic.sh`：
 
 ```bash
 -Dparallelism.default=60     # 全局并行度 60
@@ -124,13 +124,13 @@ Flink 对 key 做哈希决定它去哪个 subtask。关键性质：**同一 key 
 | ProcessingTime（处理时间） | 数据**到达计算节点**的墙钟时间 | 数据到达晚≠真实发生晚，但简单、低延迟 |
 | EventTime（事件时间） | 数据**自带的发生时间**（如 `stream_time`） | 需要 watermark 处理乱序，复杂但准确 |
 
-**本仓库全部用 ProcessingTime**（`TCLogIpPairMonitorMain` 注册表时声明 `proctime.proctime`）。代价是结果按“到达时间”而非“发生时间”切片，对实时告警可接受，但要知道这不是最严谨的语义 —— 未来可改进点。
+**本仓库全部用 ProcessingTime**（`LogIpPairMonitorMain` 注册表时声明 `proctime.proctime`）。代价是结果按“到达时间”而非“发生时间”切片，对实时告警可接受，但要知道这不是最严谨的语义 —— 未来可改进点。
 
 ## 5. Table API & SQL：用 SQL 写流处理
 
 工程主力（9 个 Job 中 7 个用 SQL）。Flink 的杀手锏：**流也可以“假装成一张表”跑 SQL**，执行时自动翻译成 DataStream 算子。
 
-看 `statistic/TCLogIpPairMonitorMain.java` 完整四步：
+看 `statistic/LogIpPairMonitorMain.java` 完整四步：
 
 ```java
 // ① 把 DataStream 注册成虚拟表（最后一个字段 proctime 是窗口用的时间列）
@@ -193,20 +193,20 @@ public class TopOneFunction extends AggregateFunction<Object, Map<Object, Long>>
 
 - **状态（State）**：`keyBy` 后每个 key 的“账本”（如 IP 的累计流量）就是状态，存在各 subtask 本地。你之所以要 `keyBy` 才能正确求和，就是因为状态按 key 隔离。
 - **Checkpoint**：Flink 周期性给所有状态拍“快照”存到远端（HDFS/S3），配合 **Kafka 的 offset**，做到“故障重启后从快照继续，不丢不重”。这就是 Flink 的**精确一次（Exactly-Once）**语义来源。
-- 仓库里消费起点 `OffsetsInitializer.committedOffsets(OffsetResetStrategy.LATEST)`（`TCLogFlinkStreamer` 中配置）就是“从上次提交的位置继续消费”。
+- 仓库里消费起点 `OffsetsInitializer.committedOffsets(OffsetResetStrategy.LATEST)`（`LogFlinkStreamer` 中配置）就是“从上次提交的位置继续消费”。
 
 ## 8. 连通器（Connector）：与外部世界交互
 
-- **Kafka Source**：`TCLogFlinkStreamer` 用新版 `KafkaSource`（`env.fromSource`）；统计/检测模块用旧版自定义 `addSource(new KafkaSourceFunction(...))`（两份 31KB 手写 Source，仓库技术债，见 Wiki）。
+- **Kafka Source**：`LogFlinkStreamer` 用新版 `KafkaSource`（`env.fromSource`）；统计/检测模块用旧版自定义 `addSource(new KafkaSourceFunction(...))`（两份 31KB 手写 Source，仓库技术债，见 Wiki）。
 - **ES Sink**：`HttpIpSink` 走 HTTP Bulk 到 ES Loader 服务。
 - **PG Sink**：`PGSink01-04` 批量写告警。
-- 依赖都在 `pom.xml`：`flink-connector-kafka_2.11`、`flink-connector-elasticsearch6_2.11`、`bsa-serializer`（自研序列化）。
+- 依赖都在 `pom.xml`：`flink-connector-kafka_2.11`、`flink-connector-elasticsearch6_2.11`、`custom-serializer`（自研序列化）。
 
 **Maven 关键点**：`flink-*` 核心依赖用 `<scope>provided</scope>`（集群自带，不打包），connector 用 `compile` 打进 fat-jar；`maven-assembly-plugin` 打出 `statistic-jar-with-dependencies.jar` 部署。
 
 ## 9. 部署：跑在 YARN 上
 
-`bin/start_*.sh` 就是部署脚本，一行看懂（`bin/start_tclog_ip_statistic.sh`）：
+`bin/start_*.sh` 就是部署脚本，一行看懂（`bin/start_log_ip_statistic.sh`）：
 
 ```bash
 flink run-application -t yarn-application \
@@ -215,7 +215,7 @@ flink run-application -t yarn-application \
 -Dtaskmanager.memory.process.size=16g \  # 每台工作节点内存
 -Dtaskmanager.numberOfTaskSlots=2 \      # 每节点 slot 数
 -Dyarn.application.name="TCLOG-IP-STATISTIC" \
--c com.example.statistic.TCLogIpMonitorMain \   # 入口类
+-c com.example.statistic.LogIpMonitorMain \   # 入口类
 /path/to/lib/statistic-jar-with-dependencies.jar \
 -source-parallelism 60
 ```
@@ -224,18 +224,18 @@ flink run-application -t yarn-application \
 
 ## 10. 回到项目：把概念串成全景图
 
-以 tclog-ip 统计这条线为例，把上面所有概念串起来。
+以 log-ip 统计这条线为例，把上面所有概念串起来。
 
 ### 10.1 完整数据流图（自动绘图）
 
 ```mermaid
 flowchart TD
     subgraph src["① Source"]
-        K["L2 Kafka<br/>t_connlog topic<br/>(BSA二进制)"] -->|"并行度60<br/>KafkaSourceFunction"| S["Source<br/>60 subtask"]
+        K["L2 Kafka<br/>t_log topic<br/>(二进制)"] -->|"并行度60<br/>KafkaSourceFunction"| S["Source<br/>60 subtask"]
     end
 
-    subgraph map1["② BSA反序列化"]
-        S -->|map| D["map: BsaSerializer.deserialize<br/>→ LogPojoParser.parseTCLog<br/>→ LogPojo"]
+    subgraph map1["② 二进制反序列化"]
+        S -->|map| D["map: BinarySerializer.deserialize<br/>→ LogPojoParser.parseLog<br/>→ LogPojo"]
     end
 
     subgraph agg["③ 加盐两阶段聚合（IpSaltedAggregator.build）"]
@@ -250,8 +250,8 @@ flowchart TD
     end
 
     subgraph sink["④ 双 Sink"]
-        GR --> H["HttpIpSink<br/>HTTP Bulk → ES Loader<br/>(tclog_ip_5min 索引)"]
-        GR --> U["IpUpsertSink<br/>Painless脚本 upsert<br/>(tclog_ip_day 日累加索引)<br/>docId=asset_ip+yyyyMMdd"]
+        GR --> H["HttpIpSink<br/>HTTP Bulk → ES Loader<br/>(log_ip_5min 索引)"]
+        GR --> U["IpUpsertSink<br/>Painless脚本 upsert<br/>(log_ip_day 日累加索引)<br/>docId=asset_ip+yyyyMMdd"]
     end
 
     H --> ES1["ES 5min 指标索引"]
@@ -262,8 +262,8 @@ flowchart TD
 
 | 图节点 | 组件 | 说明 |
 |---|---|---|
-| Source | `TCLogIpMonitorMain` | `env.addSource(new KafkaSourceFunction(...))`，并行度 `-source-parallelism`，默认 60 |
-| map 反序列化 | `BsaSerializer` + `LogPojoParser` | `BsaSerializer.deserialize` + `LogPojoParser.parseTCLog`，一条 BSA 字节 → 一个 `LogPojo` |
+| Source | `LogIpMonitorMain` | `env.addSource(new KafkaSourceFunction(...))`，并行度 `-source-parallelism`，默认 60 |
+| map 反序列化 | `BinarySerializer` + `LogPojoParser` | `BinarySerializer.deserialize` + `LogPojoParser.parseLog`，一条 二进制字节 → 一个 `LogPojo` |
 | filter 非空 | `IpSaltedAggregator` | `asset_name` 非空且 `asset_ip` 非空 |
 | map 加盐 | `SaltAssigner` | 轮转计数器 `counter % saltNum`，salt 固化进 `SaltedLog` |
 | 第一层 keyBy | `IpSaltedAggregator` | `asset_ip + "#" + salt`，热点 IP 铺满 N 个 subtask |
@@ -287,9 +287,9 @@ flowchart TD
 
 | 阶段 | 学什么 | 对应仓库动作 |
 |---|---|---|
-| 1 | DataStream API 基础算子 | 精读 `setl_flow/.../TCLogFlinkStreamer.java`（最纯的 map/filter/flatMap 链） |
+| 1 | DataStream API 基础算子 | 精读 `setl_flow/.../LogFlinkStreamer.java`（最纯的 map/filter/flatMap 链） |
 | 2 | keyBy + 窗口 | 精读 `statistic/util/IpSaltedAggregator.java`（窗口+两阶段聚合全流程） |
-| 3 | Table SQL | 精读 `statistic/TCLogIpPairMonitorMain.java` + `util/Constant.java` 的 SQL 模板 |
+| 3 | Table SQL | 精读 `statistic/LogIpPairMonitorMain.java` + `util/Constant.java` 的 SQL 模板 |
 | 4 | UDF | 精读 `statistic/udf/TopOneFunction.java`、`PortDistributionFunction.java` |
 | 5 | 状态/容错/部署 | 读 `env.conf`、启动脚本、Flink 官网 checkpoint 文档 |
 | 6 | 调优 | 读 `docs/flink-data-skew-analysis.md`（仓库自带倾斜分析，含 6 条优化建议） |
