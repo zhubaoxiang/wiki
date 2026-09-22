@@ -1,8 +1,8 @@
-# Flink 系统性入门 —— 以 cncert_kj_job 实时流处理为教材
+# Flink 系统性入门 —— 以实时流处理项目为教材
 
 > 面向读者：会 Java、懂 SQL 基本语法、但无大数据背景的开发者。
 > 技术栈：**Flink 1.14.2 / Java 8 / Maven**。
-> 本文所有概念均以 `cncert_kj_job/` 仓库真实代码为例，可对照源码阅读。
+> 本文所有概念均以仓库真实代码为例，可对照源码阅读。
 
 ## 1. 先建立心智模型：Flink 解决什么问题
 
@@ -30,17 +30,17 @@ Flink 反着来：**数据是流动的，处理逻辑挂在水管上，数据流
 
 ```mermaid
 graph LR
-    A["L1 Kafka<br/>(原始AVRO大包)"] --> B["gjk_setl_flow<br/>ETL解码+富化+过滤"]
+    A["L1 Kafka<br/>(原始AVRO大包)"] --> B["setl_flow<br/>ETL解码+富化+过滤"]
     B --> C["L2 Kafka<br/>(BSA二进制)"]
-    C --> D["gjk_statistic_engine<br/>5min窗口聚合→ES"]
-    C --> E["gjk_detect_engine<br/>规则检测→PG"]
+    C --> D["statistic_engine<br/>5min窗口聚合→ES"]
+    C --> E["detect_engine<br/>规则检测→PG"]
 ```
 
 4 个 Maven 模块、9 个 Flink Job，各管一段：SETL 清洗 → 统计出指标 → 检测出告警。
 
 ## 2. 最小骨架：一个 Flink 程序长什么样
 
-看 `gjk_setl_flow` 的 `TCLogFlinkStreamer.java`，去掉配置只留骨架：
+看 `setl_flow` 的 `TCLogFlinkStreamer.java`，去掉配置只留骨架：
 
 ```java
 public static void main(String[] args) {
@@ -48,7 +48,7 @@ public static void main(String[] args) {
     // ① 数据源
     KafkaSource<byte[]> kafkaSource = KafkaSource.<byte[]>builder()
             .setTopics(kafkaSourceTopic)
-            .setProperties(gjkKafkaParam)
+            .setProperties(kafkaParam)
             .build();
     DataStreamSource<byte[]> msg = env.fromSource(kafkaSource, ...);
     // ② 变换链
@@ -57,7 +57,7 @@ public static void main(String[] args) {
                                                   .map(new TCLogKnowledgeMap(...));
     // ③ 输出
     outputLog.addSink(new FlinkKafkaProducer(...));
-    env.execute("GJK-TCLOG-SETL");   // 启动！
+    env.execute("TCLOG-SETL");   // 启动！
 }
 ```
 
@@ -193,7 +193,7 @@ public class TopOneFunction extends AggregateFunction<Object, Map<Object, Long>>
 
 - **状态（State）**：`keyBy` 后每个 key 的“账本”（如 IP 的累计流量）就是状态，存在各 subtask 本地。你之所以要 `keyBy` 才能正确求和，就是因为状态按 key 隔离。
 - **Checkpoint**：Flink 周期性给所有状态拍“快照”存到远端（HDFS/S3），配合 **Kafka 的 offset**，做到“故障重启后从快照继续，不丢不重”。这就是 Flink 的**精确一次（Exactly-Once）**语义来源。
-- 仓库里消费起点 `OffsetsInitializer.committedOffsets(OffsetResetStrategy.LATEST)`（`TCLogFlinkStreamer` L111）就是“从上次提交的位置继续消费”。
+- 仓库里消费起点 `OffsetsInitializer.committedOffsets(OffsetResetStrategy.LATEST)`（`TCLogFlinkStreamer` 中配置）就是“从上次提交的位置继续消费”。
 
 ## 8. 连通器（Connector）：与外部世界交互
 
@@ -202,7 +202,7 @@ public class TopOneFunction extends AggregateFunction<Object, Map<Object, Long>>
 - **PG Sink**：`PGSink01-04` 批量写告警。
 - 依赖都在 `pom.xml`：`flink-connector-kafka_2.11`、`flink-connector-elasticsearch6_2.11`、`bsa-serializer`（自研序列化）。
 
-**Maven 关键点**：`flink-*` 核心依赖用 `<scope>provided</scope>`（集群自带，不打包），connector 用 `compile` 打进 fat-jar；`maven-assembly-plugin` 打出 `gjk_statistic-jar-with-dependencies.jar` 部署。
+**Maven 关键点**：`flink-*` 核心依赖用 `<scope>provided</scope>`（集群自带，不打包），connector 用 `compile` 打进 fat-jar；`maven-assembly-plugin` 打出 `statistic-jar-with-dependencies.jar` 部署。
 
 ## 9. 部署：跑在 YARN 上
 
@@ -214,9 +214,9 @@ flink run-application -t yarn-application \
 -Djobmanager.memory.process.size=12g \   # 协调节点内存
 -Dtaskmanager.memory.process.size=16g \  # 每台工作节点内存
 -Dtaskmanager.numberOfTaskSlots=2 \      # 每节点 slot 数
--Dyarn.application.name="GJK-TCLOG-IP-STATISTIC" \
--c com.nsfocus.statistic.TCLogIpMonitorMain \   # 入口类
-/opt/apps/gjk_data_proc/lib/gjk_statistic-jar-with-dependencies.jar \
+-Dyarn.application.name="TCLOG-IP-STATISTIC" \
+-c com.example.statistic.TCLogIpMonitorMain \   # 入口类
+/path/to/lib/statistic-jar-with-dependencies.jar \
 -source-parallelism 60
 ```
 
@@ -230,15 +230,15 @@ flink run-application -t yarn-application \
 
 ```mermaid
 flowchart TD
-    subgraph src["① Source（L98-99）"]
+    subgraph src["① Source"]
         K["L2 Kafka<br/>t_connlog topic<br/>(BSA二进制)"] -->|"并行度60<br/>KafkaSourceFunction"| S["Source<br/>60 subtask"]
     end
 
-    subgraph map1["② BSA反序列化（L101-111）"]
+    subgraph map1["② BSA反序列化"]
         S -->|map| D["map: BsaSerializer.deserialize<br/>→ LogPojoParser.parseTCLog<br/>→ LogPojo"]
     end
 
-    subgraph agg["③ 加盐两阶段聚合（L120 → IpSaltedAggregator.build）"]
+    subgraph agg["③ 加盐两阶段聚合（IpSaltedAggregator.build）"]
         D -->|filter| F["filter: asset_name非空<br/>asset_ip非空"]
         F -->|map| SA["map: SaltAssigner<br/>轮转分配 salt 0..59<br/>→ SaltedLog.log+salt"]
         SA -->|keyBy| K1["keyBy: asset_ip + '#' + salt<br/>第一层·热点打散到 60 subtask"]
@@ -249,7 +249,7 @@ flowchart TD
         W2 -->|reduce| GR["reduce: GlobalReduce<br/>合并各salt partial<br/>→ 每窗口每IP一条"]
     end
 
-    subgraph sink["④ 双 Sink（L126-127）"]
+    subgraph sink["④ 双 Sink"]
         GR --> H["HttpIpSink<br/>HTTP Bulk → ES Loader<br/>(tclog_ip_5min 索引)"]
         GR --> U["IpUpsertSink<br/>Painless脚本 upsert<br/>(tclog_ip_day 日累加索引)<br/>docId=asset_ip+yyyyMMdd"]
     end
@@ -260,20 +260,20 @@ flowchart TD
 
 ### 10.2 节点核对表（对照源码）
 
-| 图节点 | 源码位置 | 说明 |
+| 图节点 | 组件 | 说明 |
 |---|---|---|
-| Source | `TCLogIpMonitorMain` L98-99 | `env.addSource(new KafkaSourceFunction(...))`，并行度 `-source-parallelism`，默认 60 |
-| map 反序列化 | L101-111 | `BsaSerializer.deserialize` + `LogPojoParser.parseTCLog`，一条 BSA 字节 → 一个 `LogPojo` |
-| filter 非空 | `IpSaltedAggregator` L63-66 | `asset_name` 非空且 `asset_ip` 非空 |
-| map 加盐 | L80-94 `SaltAssigner` | 轮转计数器 `counter % saltNum`，salt 固化进 `SaltedLog` |
-| 第一层 keyBy | L70 | `asset_ip + "#" + salt`，热点 IP 铺满 N 个 subtask |
-| 第一层窗口 | L71 | `TumblingProcessingTimeWindows.of(windowMs)`，windowMs=5min |
-| 第一层 aggregate | L72 `PartialAgg` | 增量 `min/max/sum`，`PartialWindow` 打 windowEnd |
-| 第二层 keyBy | L74 | `asset_ip + "#" + windowEnd`，去盐、按窗口对齐 |
-| 第二层窗口 | L75 | 同长度 5min 滚动窗口 |
-| 第二层 reduce | L76 `GlobalReduce` | 合并各 salt partial → 每窗口每 IP 一条 |
-| HttpIpSink | L126 | 累积 `batchSize`(默认10000) 或 `maxBytes`(默认5MB) 触发 HTTP POST 到 ES Loader |
-| IpUpsertSink | L127 | Painless 脚本 upsert，日索引累加，docId=`asset_ip`+日期 |
+| Source | `TCLogIpMonitorMain` | `env.addSource(new KafkaSourceFunction(...))`，并行度 `-source-parallelism`，默认 60 |
+| map 反序列化 | `BsaSerializer` + `LogPojoParser` | `BsaSerializer.deserialize` + `LogPojoParser.parseTCLog`，一条 BSA 字节 → 一个 `LogPojo` |
+| filter 非空 | `IpSaltedAggregator` | `asset_name` 非空且 `asset_ip` 非空 |
+| map 加盐 | `SaltAssigner` | 轮转计数器 `counter % saltNum`，salt 固化进 `SaltedLog` |
+| 第一层 keyBy | `IpSaltedAggregator` | `asset_ip + "#" + salt`，热点 IP 铺满 N 个 subtask |
+| 第一层窗口 | `IpSaltedAggregator` | `TumblingProcessingTimeWindows.of(windowMs)`，windowMs=5min |
+| 第一层 aggregate | `PartialAgg` | 增量 `min/max/sum`，`PartialWindow` 打 windowEnd |
+| 第二层 keyBy | `IpSaltedAggregator` | `asset_ip + "#" + windowEnd`，去盐、按窗口对齐 |
+| 第二层窗口 | `IpSaltedAggregator` | 同长度 5min 滚动窗口 |
+| 第二层 reduce | `GlobalReduce` | 合并各 salt partial → 每窗口每 IP 一条 |
+| HttpIpSink | `HttpIpSink` | 累积 `batchSize`(默认10000) 或 `maxBytes`(默认5MB) 触发 HTTP POST 到 ES Loader |
+| IpUpsertSink | `IpUpsertSink` | Painless 脚本 upsert，日索引累加，docId=`asset_ip`+日期 |
 
 ### 10.3 这条链路对应的核心知识点
 
@@ -287,11 +287,11 @@ flowchart TD
 
 | 阶段 | 学什么 | 对应仓库动作 |
 |---|---|---|
-| 1 | DataStream API 基础算子 | 精读 `gjk_setl_flow/.../TCLogFlinkStreamer.java`（最纯的 map/filter/flatMap 链） |
+| 1 | DataStream API 基础算子 | 精读 `setl_flow/.../TCLogFlinkStreamer.java`（最纯的 map/filter/flatMap 链） |
 | 2 | keyBy + 窗口 | 精读 `statistic/util/IpSaltedAggregator.java`（窗口+两阶段聚合全流程） |
 | 3 | Table SQL | 精读 `statistic/TCLogIpPairMonitorMain.java` + `util/Constant.java` 的 SQL 模板 |
 | 4 | UDF | 精读 `statistic/udf/TopOneFunction.java`、`PortDistributionFunction.java` |
-| 5 | 状态/容错/部署 | 读 `gjk_env.conf`、启动脚本、Flink 官网 checkpoint 文档 |
+| 5 | 状态/容错/部署 | 读 `env.conf`、启动脚本、Flink 官网 checkpoint 文档 |
 | 6 | 调优 | 读 `docs/flink-data-skew-analysis.md`（仓库自带倾斜分析，含 6 条优化建议） |
 
 **入门资料**：官方文档《Flink 基础概念》一节 + 《Flink 内核原理与实现》（孙金城）进阶。

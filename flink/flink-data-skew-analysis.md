@@ -1,7 +1,7 @@
-# CNCERT KJ Flink 大数据任务数据倾斜分析报告
+# Flink 大数据任务数据倾斜分析报告
 
 > 生成时间：2026-08-05
-> 分析范围：`cncert_kj_job/` 下 3 个 Flink 模块（9 个实时 Job）
+> 分析范围：工程根目录下 3 个 Flink 模块（9 个实时 Job）
 > 技术栈：Flink 1.14.2 / Java 8 / Scala 2.11 / Maven
 
 ---
@@ -10,10 +10,10 @@
 
 | 模块 | 路径 | 职责 | 包根 | Job 数 |
 |---|---|---|---|---|
-| `gjk_setl_flow` | `src/gjk_setl_flow/` | ETL：L1 Kafka 解码+富化+过滤 → L2 Kafka | `etl.flow` | 2 |
-| `gjk_statistic_engine` | `src/gjk_statistic_engine/` | 统计：L2 Kafka → 5min 窗口聚合 → ES | `statistic` | 4 |
-| `gjk_detect_engine` | `src/gjk_detect_engine/` | 检测：L2 Kafka → 多 SQL 规则 → PG | `detect` | 3 |
-| `gjk_daymodels_engine` | `src/gjk_daymodels_engine/` | 离线日模型（Spark，非 Flink，本文忽略） | `statistics` | — |
+| `setl_flow` | `src/setl_flow/` | ETL：L1 Kafka 解码+富化+过滤 → L2 Kafka | `etl.flow` | 2 |
+| `statistic_engine` | `src/statistic_engine/` | 统计：L2 Kafka → 5min 窗口聚合 → ES | `statistic` | 4 |
+| `detect_engine` | `src/detect_engine/` | 检测：L2 Kafka → 多 SQL 规则 → PG | `detect` | 3 |
+| `daymodels_engine` | `src/daymodels_engine/` | 离线日模型（Spark，非 Flink，本文忽略） | `statistics` | — |
 
 ### 9 个 Flink Job 入口类一览
 
@@ -37,7 +37,7 @@
 
 ## 二、各 Job 数据流图与分区分析
 
-### 2.1 ETL 流（gjk_setl_flow）
+### 2.1 ETL 流（setl_flow）
 
 ```mermaid
 graph LR
@@ -65,7 +65,7 @@ L1 Kafka → flatMap(AVRO解码) → map(NetflowKnowledgeMap) → filter(Netflow
 - **无 KeyBy**：纯 map/filter 流水线
 - **filter 位置**：`filter(NetflowFilter)` 在 `map(KnowledgeMap)` **之后**执行，先富化再过滤
 
-### 2.2 统计流（gjk_statistic_engine）— 4 个 Job
+### 2.2 统计流（statistic_engine）— 4 个 Job
 
 ```mermaid
 graph TB
@@ -109,10 +109,10 @@ GROUP BY TUMBLE(proctime, INTERVAL '5' MINUTE), doc_id
 - **分组 key**：`TUMBLE(proctime, 5min) + doc_id`
 - **doc_id 生成逻辑**（`ESUtil.getESDocId`）：`SHA-256(asset_ip + peer_ip)` 取前 16 字节 → 32 位 hex 字符串
 - **隐式分区**：Flink 按 `doc_id`（String 类型）做 hash 分区
-- **倾斜风险**：⭐⭐ **极高** — `doc_id` 本质是 `asset_ip + peer_ip` 的哈希，若某个 asset_ip 与大量 peer_ip 通信，会产生海量不同 doc_id，但所有 doc_id 的数据量都集中在该 asset_ip 的连接上。更严重的是，如果某个热门 IP 对（如 DNS 服务器 8.8.8.8↔某网关）在 5 分钟内产生数百万条记录，这些记录的 doc_id 相同，全部 hash 到同一 subtask
+- **倾斜风险**：⭐⭐ **极高** — `doc_id` 本质是 `asset_ip + peer_ip` 的哈希，若某个 asset_ip 与大量 peer_ip 通信，会产生海量不同 doc_id，但所有 doc_id 的数据量都集中在该 asset_ip 的连接上。更严重的是，如果某个热门 IP 对（如某热点 DNS 服务器↔某网关）在 5 分钟内产生数百万条记录，这些记录的 doc_id 相同，全部 hash 到同一 subtask
 - **增量聚合**：`SUM`/`COUNT`/`MIN`/`MAX` 增量；但 `TopOne`、`FlowTop1`、`PORT_DISTRIBUTION`、`PortTopNFunction` 等自定义 `AggregateFunction` UDF 在 accumulator 中维护 `Map`/`Set`/`List`，**状态会随窗口内不同端口数线性增长**
 
-### 2.3 检测流（gjk_detect_engine）— 3 个 Job
+### 2.3 检测流（detect_engine）— 3 个 Job
 
 ```mermaid
 graph TB
@@ -192,7 +192,7 @@ GROUP BY TUMBLE(proctime, INTERVAL '5' MINUTE), sip
 | Salting（加盐）策略 | ❌ 否 | — | 无任何加盐/随机前缀逻辑 |
 | 两阶段聚合（Local+Global） | ⚠️ 部分 | `NetflowCountMain` | SQL 按 sip 聚合后 `windowAll` 全局聚合，但 windowAll 并行度=1，等于退化为单阶段 |
 | KeyBy 前 filter 过滤无效数据 | ✅ 是 | ETL 层 `TCLogFilter`/`NetflowFilter`；检测层 `WhiteListFilter`/`AssetFilter`/`KeyUnitFilter` | 过滤脏数据（>10TB/超7天/未跨境/零流量）和白名单/非重点单位 |
-| **硬编码热点 IP 过滤** | ✅ 是 | `BigKeyFilter` | **唯一显式倾斜处理**：硬编码过滤 IP `134744072L`（=8.8.8.8），仅用于 netflow-ippair-statistic |
+| **硬编码热点 IP 过滤** | ✅ 是 | `BigKeyFilter` | **唯一显式倾斜处理**：硬编码过滤某热点公网 IP，仅用于 netflow-ippair-statistic |
 | rebalance/rescale 打散 | ❌ 否 | — | 无任何调用 |
 | 增量聚合（AggregateFunction） | ✅ 是 | 大量 UDF | `SUM`/`COUNT`/`MIN`/`MAX` + 自定义 `TopOneFunction`/`FlowTop1PortFunction`/`PortDistributionFunction` 等 |
 | 全窗口聚合（ProcessWindowFunction） | ❌ 否 | — | 无 `ProcessWindowFunction`，全部使用增量 `AggregateFunction` |
@@ -205,7 +205,7 @@ GROUP BY TUMBLE(proctime, INTERVAL '5' MINUTE), sip
 public class BigKeyFilter extends RichFilterFunction<LogPojo> {
     private final HashSet<Long> ips = new HashSet<>();
     public void open(Configuration parameters) {
-        this.ips.add(134744072L);  // 134744072 = 8.8.8.8 (Google DNS)
+        this.ips.add(HOT_IP_LONG);  // 某热点公网 IP 的 Long 表示
     }
     public boolean filter(LogPojo value) {
         if (value == null) return false;
@@ -214,7 +214,7 @@ public class BigKeyFilter extends RichFilterFunction<LogPojo> {
 }
 ```
 - **仅用于** `NetFlowIpPairMonitorMain`，在 `map` 之后、注册 Table 之前过滤
-- **硬编码** IP `134744072L`（即 `8.8.8.8` Google DNS），直接丢弃该 IP 的所有 IP Pair 统计数据
+- **硬编码**某热点公网 IP（以常量形式写入代码），直接丢弃该 IP 的所有 IP Pair 统计数据
 - **问题**：① 热点 IP 列表写死在代码中，无法动态调整；② 数据被直接丢弃而非打散，影响统计完整性；③ 仅 netflow-ippair 使用，tclog-ippair 未使用
 
 ---
@@ -234,7 +234,7 @@ public class BigKeyFilter extends RichFilterFunction<LogPojo> {
 
 ### 风险点 2：NetflowCountMain 的 windowAll 单点瓶颈 ⭐⭐⭐ 致命
 
-**位置**：`NetflowCountMain` 第 107-116 行
+**位置**：`NetflowCountMain`
 
 **原因**：
 ```java
@@ -328,7 +328,7 @@ String FLOW_COUNT_SQL = "SELECT MAX(start_time), SUM(up_bytes), SUM(down_bytes) 
 **当前问题**：硬编码 IP、直接丢弃数据、仅 1 个 Job 使用
 
 **改进**：
-1. 热点 IP 列表从 `gjk_env.conf` 或 PG 表动态加载（可运行时更新）
+1. 热点 IP 列表从 `env.conf` 或 PG 表动态加载（可运行时更新）
 2. 对热点 IP 不直接丢弃，而是采样或限流（如每 100 条取 1 条，或按时间窗口限流）
 3. 在 tclog-ippair-statistic 中也启用 BigKeyFilter（当前缺失）
 
