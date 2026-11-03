@@ -21,13 +21,13 @@
 两种跑法：
 
     # 1. 零成本：假模型 + 真工具（不需要 API key，但工具真的发 HTTP 请求）
-    python agent.py --mock
+    python agent_demo.py --mock
 
     # 2. 完整：真模型 + 真工具
     export LLM_API_KEY=sk-xxxx
     export LLM_BASE_URL=https://api.deepseek.com/v1
     export LLM_MODEL=deepseek-chat
-    python agent.py
+    python agent_demo.py
 
     换任何 OpenAI 兼容厂商（通义 / Kimi / 智谱 / OpenAI / 本地 vLLM）都只改这两个变量。
 
@@ -220,7 +220,7 @@ class RealLLM:
             raise SystemExit(
                 "缺少环境变量 LLM_API_KEY。\n"
                 "  想先不花钱跑通循环？加 --mock 参数用假模型：\n"
-                "      python agent.py --mock"
+                "      python agent_demo.py --mock"
             )
 
         self.client = OpenAI(
