@@ -1,0 +1,14 @@
+AI/MCP入门指南.md
+  h_1c2395c8f9a92f 109,156-217,263,267,284,298
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ffbd1f047136eb025ab606a1f709d89d2a6fdbfb",
+  "prompts": {},
+  "humans": {
+    "h_1c2395c8f9a92f": {
+      "author": "zhubaoxiang2 <zhubaoxiang2@intra.nsfocus.com>"
+    }
+  }
+}
