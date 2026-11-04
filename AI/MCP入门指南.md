@@ -106,7 +106,7 @@ MCP 只有一个端点（`/mcp`），"要做什么"放在请求体的 `method` �
    │ <──────────── 工具执行结果 ────────────│
 ```
 
-模型的决策依据只有 `tools/list` 返回的 **name + description + JSON Schema**——它看不到你的代码。这就是为什么工具的描述文案如此重要（见第 6 节）。
+模型的决策依据只有 `tools/list` 返回的 **name + description + JSON Schema**——它看不到你的代码。这就是为什么工具的描述文案如此重要（见第 7 节）。
 
 ### 3.3 用 curl 亲眼看看协议
 
@@ -153,7 +153,68 @@ curl -s -X POST http://127.0.0.1:8765/mcp \
 
 ---
 
-## 4. 最小 Demo：20 行一个 MCP Server
+## 4. 两种传输模式：stdio vs Streamable HTTP
+
+MCP 协议层与传输解耦——**同一份 Server 代码不用改一行协议逻辑**，`mcp.run()` 的参数一换就能切换传输。所以选型看的不是功能强弱，而是"谁来用、连的是什么"。
+
+### 4.1 stdio：客户端拉起子进程
+
+客户端（Claude Code / Claude Desktop / Trae / WorkBuddy）按配置把 Server 作为**子进程**拉起，通过 stdin/stdout 管道交换 JSON-RPC 消息：
+
+```
+Claude Code（Host + Client）
+   │ 拉起子进程，stdin/stdout 管道直连
+   ▼
+mini_server.py 进程（随客户端启动而启动、退出而退出）
+```
+
+配置方式（写在客户端的 mcp 配置里，即"自定义连接器 / MCP Server 配置"）：
+
+```json
+{
+  "mcpServers": {
+    "demo": {
+      "command": "python",
+      "args": ["D:/path/to/mini_server.py"],
+      "env": {}
+    }
+  }
+}
+```
+
+特点：
+
+| 特点 | 说明 |
+|---|---|
+| 生命周期绑定客户端 | 客户端启动才拉起、客户端退出即终止，**零运维** |
+| 无网络 | 走本地管道，不开端口、无鉴权问题，天然只有本机能用 |
+| 1:1 会话 | 一个客户端一份进程，各客户端状态天然隔离 |
+| stdout 被协议独占 | 调试打印必须写到 **stderr**——`print` 到 stdout 会污染 JSON-RPC 流，直接把连接搞挂（新手第一大坑） |
+
+### 4.2 Streamable HTTP：独立服务常驻
+
+独立进程部署在服务器上常驻运行，每条消息一个 HTTP POST，可被**多个客户端同时连接**（协议细节见第 3 节）。它带来 stdio 没有的能力：统一鉴权、限流、审计日志、容器化部署与健康检查。
+
+### 4.3 对比与选型
+
+| 维度 | stdio | Streamable HTTP |
+|---|---|---|
+| 部署形态 | 客户端子进程 | 独立常驻服务 |
+| 使用范围 | 仅本机、单人 | 团队共享、跨机器 |
+| 生命周期 | 随客户端启停 | 独立部署、持续运行 |
+| 鉴权/审计 | 无（本机信任模型） | 可加鉴权、限流、审计 |
+| 运维成本 | 零 | 需部署、监控、排障（见第 7 节） |
+| 典型场景 | 本地文件操作、个人 IDE 助手、连你自己电脑上的工具 | 团队共用一个业务系统网关、需要集中管控数据权限（如本文第 5 节的 events 系统） |
+
+选型口诀只有一句：**看 Server 连的是"你电脑上的东西"还是"公司的东西"**。
+
+- 连你本机的东西（读本地文件、跑本地脚本）→ stdio，零运维
+- 连公司系统（数据库、内网业务接口）、多人共用、需要统一数据权限 → Streamable HTTP
+- 两者不冲突：先 stdio 本地开发调试，上线时切 HTTP——协议层代码完全不变，只改 `mcp.run()` 那一行
+
+---
+
+## 5. 最小 Demo：20 行一个 MCP Server
 
 下面是一个不依赖任何业务的完整 MCP 服务，任何装了 Python 3.10+ 的机器都能跑。
 
@@ -199,11 +260,11 @@ python mini_server.py
 | docstring | 会原样进入 `tools/list` 的 description——**模型只看这段文字决定何时调用**，所以"什么时候用/什么时候不要用"都写在里面 |
 | 类型注解 | `a: int` 不是摆设，SDK 据此生成参数 Schema 并做校验；写错的参数模型会收到可自纠的错误信息 |
 
-换个传输只需改一行：`mcp.run()`（默认 stdio，供 Claude Desktop 这类本地客户端拉起）。协议层代码完全不变——这就是第 3.1 节说的"传输可替换"。
+换个传输只需改一行：`mcp.run()`（默认 stdio，供 Claude Desktop 这类本地客户端拉起）。协议层代码完全不变——这就是第 3.1 节说的"传输可替换"，两种模式怎么选见第 4 节。
 
 ---
 
-## 5. 把 REST 变成"好用"的 MCP：六个关键设计
+## 6. 把 REST 变成"好用"的 MCP：六个关键设计
 
 第 4 节的 demo 跑通很容易，但**决定 MCP 服务好不好用的是契约层设计**。协议层 SDK 已包办，真正投入精力的是下面六件事 `client.py` / `server.py` 就是按这六条实现的，可对照源码：
 
@@ -220,7 +281,7 @@ python mini_server.py
 
 ---
 
-## 6. 常见坑速查
+## 7. 常见坑速查
 
 | 现象 | 原因 | 解法 |
 |---|---|---|
@@ -234,7 +295,7 @@ python mini_server.py
 
 ---
 
-## 7. 延伸阅读
+## 8. 延伸阅读
 
 - MCP 官方规范：<https://modelcontextprotocol.io/specification>（含 lifecycle、transports、tools 各章节）
 - 官方 Python SDK：<https://github.com/modelcontextprotocol/python-sdk>
