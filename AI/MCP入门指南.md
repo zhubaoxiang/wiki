@@ -299,3 +299,4 @@ python mini_server.py
 
 - MCP 官方规范：<https://modelcontextprotocol.io/specification>（含 lifecycle、transports、tools 各章节）
 - 官方 Python SDK：<https://github.com/modelcontextprotocol/python-sdk>
+- 配套阅读：本文档同目录的 [Skill入门指南](Skill入门指南.md)（知识层：模型怎么"知道该怎么做"）、[Harness入门指南](Harness入门指南.md)（执行层：循环、工具执行与权限）
