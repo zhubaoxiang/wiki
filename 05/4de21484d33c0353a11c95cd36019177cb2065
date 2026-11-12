@@ -1,0 +1,18 @@
+AI/Harness入门指南.md
+  h_1c2395c8f9a92f 1-159
+AI/MCP入门指南.md
+  h_1c2395c8f9a92f 302
+AI/Skill入门指南.md
+  h_1c2395c8f9a92f 1-219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "054de21484d33c0353a11c95cd36019177cb2065",
+  "prompts": {},
+  "humans": {
+    "h_1c2395c8f9a92f": {
+      "author": "zhubaoxiang2 <zhubaoxiang2@intra.nsfocus.com>"
+    }
+  }
+}
